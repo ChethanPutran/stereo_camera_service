@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: stereo_camera_service
+Version: 0.1.0
+Summary: A Python package for interfacing Raspberry Pi with Waveshare Binocular Camera and enabling remote stereo vision services.
+Home-page: https://github.com/ChethanPutran/stereo_camera_service
+Author: Chethan
+Author-email: chethansputran222@gmail.com
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Scientific/Engineering :: Image Recognition
+Classifier: Topic :: Software Development :: Embedded Systems
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: opencv-contrib-python==4.4.0.46
+Requires-Dist: picamera2==0.3.9
+Requires-Dist: paramiko==3.5.1
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

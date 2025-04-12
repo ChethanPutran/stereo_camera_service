@@ -1,0 +1,2 @@
+[console_scripts]
+stereo_camera = server.camera_server:main

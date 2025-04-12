@@ -1,0 +1,17 @@
+README.md
+setup.py
+camera/__init__.py
+camera/camera.py
+camera/parameters.py
+client/__init__.py
+client/camera_client.py
+server/__init__.py
+server/camera_server.py
+stereo_camera_service.egg-info/PKG-INFO
+stereo_camera_service.egg-info/SOURCES.txt
+stereo_camera_service.egg-info/dependency_links.txt
+stereo_camera_service.egg-info/entry_points.txt
+stereo_camera_service.egg-info/requires.txt
+stereo_camera_service.egg-info/top_level.txt
+tests/__init__.py
+tests/test_server.py
