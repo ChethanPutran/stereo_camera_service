@@ -1,6 +1,6 @@
 # Stereo Camera Service 📷🔧
 
-A Python package to interface a Raspberry Pi with the [Waveshare Binocular Camera Base Board](https://www.waveshare.com/cm4-dual-camera-base.html), enabling stereo image capture and remote access to stereo vision services from a client PC.
+A Python package to interface a Raspberry Pi with the [Waveshare Binocular Camera Base Board](https://www.waveshare.com/wiki/CM4-DUAL-CAMERA-BASE), enabling stereo image capture and remote access to stereo vision services from a client PC.
 
 ---
 
