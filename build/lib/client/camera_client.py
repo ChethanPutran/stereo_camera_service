@@ -1,37 +1,62 @@
-import sys
 import os
 import cv2
 import time
 import logging
 from utils.socket_handler import SocketHandler
-from utils.command_handler import Request
+from utils.command_handler import Request,Response,Command,FrameData,CameraConfig
 import argparse
+import numpy as np
+from config.settings import HOST,PORT_C,PORT_S,HEADER_SIZE,RECORDING_DIR
 
-STERIO = True
-RECORDING_DIR = 'recordings'
-DEBUG = True
-HOST = 'raspberrypi.local'
-PORT = 8000
-HEADER_SIZE = 10
 
-def extract_video(recording,sterio=STERIO):
+
+
+
+def stero_video_writer(callback,left_file_name,right_file_name):
     recording_dir = os.path.join(os.path.dirname(__file__),RECORDING_DIR)
 
-    fname_l = os.path.join(recording_dir,recording[0][0])
-    buff_l = recording[0][1]
+    config:CameraConfig = callback()
 
-    with open(fname_l,'wb') as file:
-        file.write(buff_l)
+    frame_count = config.frame_count
+    fps=config.fps
+    width=config.width
+    height=config.height
+    bar_length = 30
+    count = 0
 
-    if sterio:
-        fname_r = os.path.join(recording_dir,recording[1][0])
-        buff_r = recording[1][1]
+    # Define the codec and create VideoWriter object
+    fourcc = cv2.VideoWriter_fourcc(*'XVID') 
+    out_l = cv2.VideoWriter(left_file_name, fourcc, fps, (width, height))
+    out_r = cv2.VideoWriter(right_file_name, fourcc, fps, (width, height))
 
-        with open(fname_r,'wb') as file:
-            file.write(buff_r)
-        return fname_l,fname_r
+    while True:
+        data:FrameData = callback()
+
+        if data.header.end:
+            break
+
+        # Decode buffer
+        frame_l = cv2.imdecode(np.frombuffer(data.data.left, np.uint8), cv2.IMREAD_COLOR)
+        frame_r = cv2.imdecode(np.frombuffer(data.data.right, np.uint8), cv2.IMREAD_COLOR)
+
+        progress = count / frame_count
+        filled = int(bar_length * progress)
+        bar = '*' * filled + '-' * (bar_length - filled)
+        print(f'\rDownloading... |{bar}| {int(progress*100)}%', end='')
+
+        # Write the frame to file
+        out_l.write(frame_l)  
+        out_r.write(frame_r)
+        count+=1
+        # cv2.waitKey(1)  # simulate ~30fps
     
-    return fname_l
+    print('\rDownloading... |' + '*' * bar_length + '| 100%')
+    print("Downloading Complete!")
+
+    out_l.release()
+    out_r.release()
+
+    return left_file_name,right_file_name
 
 # if DEBUG:
 #     logging.basicConfig(filename="app_c.log", level=logging.DEBUG, 
@@ -47,7 +72,7 @@ class CameraClient:
     Client interface for communicating with a remote stereo camera server over a socket.
     Supports live streaming, image capture, video recording, and retrieval.
     """
-    def __init__(self, host=HOST, port=PORT, header_size=HEADER_SIZE, logger=None):
+    def __init__(self, host=HOST, port_c=PORT_C,port_s=PORT_S, header_size=HEADER_SIZE):
         """
         Initialize CameraClient.
 
@@ -57,19 +82,20 @@ class CameraClient:
             header_size (int): Header size used for socket communication.
             logger (logging.Logger, optional): Logger instance.
         """
-        self.host = host
-        self.port = port
-        self.logger = logger or logging.getLogger(__name__)
-        self.socket_handler = SocketHandler(host, port, logger=self.logger)
+        self.logger =  logging.getLogger()
+        self.command_socket_handler = SocketHandler(host, port_c)
+        self.command_socket_handler.init_reciever()
+        self.stream_socket_handler = SocketHandler(host, port_s)
         self.header_size = header_size
-        self.live_ended = False
+        self.count = 0
 
     def start_recording(self):
         """Send start recording request to the server."""
         try:
-            req = Request(start_recording=True)
-            self.socket_handler.send(req)
-            return self.socket_handler.recieve()
+            req = Request(Command.START_RECORDING)
+            self.command_socket_handler.send(req)
+            self.logger.info("Req. sent")
+            return self.get_response()
         except Exception as e:
             self.logger.error(f"Error starting recording: {e}")
             return {"error": str(e), "message": None}
@@ -77,9 +103,9 @@ class CameraClient:
     def end_recording(self):
         """Send end recording request to the server."""
         try:
-            req = Request(end_recording=True)
-            self.socket_handler.send(req)
-            return self.socket_handler.recieve()
+            req = Request(Command.END_RECORDING)
+            self.command_socket_handler.send(req)
+            return self.get_response()
         except Exception as e:
             self.logger.error(f"Error ending recording: {e}")
             return {"error": str(e), "message": None}
@@ -87,43 +113,53 @@ class CameraClient:
     def get_recording(self):
         """Retrieve recorded video from the server."""
         try:
-            req = Request(get_recording=True)
-            self.socket_handler.send(req)
-            res = self.socket_handler.recieve(is_file=True)
-            if res['error']:
-                return None, res['error']
-            self.logger.info(res['message'])
-            return extract_video(res['data']), None
+            req = Request(Command.GET_RECORDING)
+            self.command_socket_handler.send(req)
+
+            res = self.get_response(is_file=True)
+            if res.error:
+                return None, res.error
+            
+            self.logger.info(res.message)
+
+            def recieve_large_chunks():
+                return self.command_socket_handler.recieve(is_file=True)
+
+            return stero_video_writer(recieve_large_chunks,"sl.avi","sr.avi"),None
+
         except Exception as e:
             self.logger.error(f"Error getting recording: {e}")
             return None, str(e)
 
     def close(self):
         """Close socket connection."""
-        self.socket_handler.close()
+        req = Request(Command.EXIT)
+        self.command_socket_handler.send(req)
+        self.command_socket_handler.close()
+
+    def get_response(self,is_file=False)->Response:
+        res = self.command_socket_handler.recieve(is_file=is_file)
+        return res
 
     def start_live(self):
         """Start live video stream from the server."""
         try:
-            req = Request(start_live=True)
-            self.socket_handler.send(req)
-            self.socket_handler.recive_live_stream(self.display_live_capture, separe_thread=True)
+            req = Request(Command.START_LIVE)
+            self.command_socket_handler.send(req)
+            res = self.get_response()
+            if res.error:
+                raise Exception(res.error)
+            self.logger.info(res.message)
+            self.stream_socket_handler.recive_live_stream(self.display_live_capture, separe_thread=True)
         except Exception as e:
             self.logger.error(f"Error starting live stream: {e}")
 
     def end_live(self):
         """Stop the live video stream."""
         try:
-            req = Request(end_live=True)
-            self.socket_handler.send(req)
-            # Wait for confirmation
-            animation = "|/-\\"
-            idx = 0
-            while not self.live_ended:
-                print(animation[idx % len(animation)], end="\r")
-                idx += 1
-                time.sleep(0.1)
-            return self.socket_handler.recieve()
+            req = Request(Command.END_LIVE)
+            self.command_socket_handler.send(req)
+            return self.get_response()
         except Exception as e:
             self.logger.error(f"Error ending live stream: {e}")
             return {"error": str(e), "message": None}
@@ -131,19 +167,20 @@ class CameraClient:
     def capture_image(self):
         """Capture an image from the stereo camera."""
         try:
-            req = Request(capture_img=True)
-            self.socket_handler.send(req)
-            res = self.socket_handler.recieve(is_file=True)
-            if res['error']:
-                return False, res['error']
-            print(res['message'])
-            data = res['data']
+            req = Request(Command.CAPTURE_IMAGE)
+            self.command_socket_handler.send(req)
+            res =self.get_response(True)
+            if res.error:
+                return False, res.error
+            self.logger.info(res.message)
+            data = res.data
             return True, (data['img_left'], data['img_right'])
         except Exception as e:
             self.logger.error(f"Error capturing image: {e}")
             return False, str(e)
 
-    def display_live_capture(self, status, frame):
+    def display_live_capture(self, status, frames):
+        # self.count+=1
         """
         Callback function to display incoming frames in live stream.
         
@@ -151,107 +188,23 @@ class CameraClient:
             status (bool): Indicates if a new frame is available.
             frame (np.ndarray): The image frame.
         """
-        if status and frame is not None:
-            cv2.imshow('Live Frame', frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                self.socket_handler.end_live_stream()
+   
+        if status:
+            cv2.imshow('Live Frame', frames[0])
+            cv2.waitKey(1)
+            # if (frames is None) or (frames[0] is None): 
+            #     return
+            # try:
+            #     cv2.imshow('Live Frame', frames[0])
+            #     cv2.waitKey(1)
+            # except Exception as e:
+            #     print("<END>" == frames)
+            #     with open("out.txt",'w') as f:
+            #         f.writelines(frames)
         else:
-            self.live_ended = True
-        cv2.destroyAllWindows()
-
-           
-def main(command,host,port,debug=False,save_logs=False):
-    
-    if debug:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.INFO)
-
-    logger = logging.getLogger(__name__)
-
-    if save_logs:
-        handler = logging.FileHandler('app_s.log')
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-
-    client = CameraClient(host,port)
-    try:
-        if command == "start-recording":
-            res = client.start_recording()
-            logger.info(res)
-        elif command == "end-recording":
-            res = client.end_recording()
-        elif command == "get-recording":
-            video_paths, error = client.get_recording()
-            if error:
-                logger.info(f"[❌ ERROR] {error}")
-            else:
-                logger.info(f"[📦 SAVED] Files saved: {video_paths}")
-            return
-        elif command == "start-live":
-            logger.info("[🎥 LIVE] Press 'q' to stop streaming.")
-            client.start_live()
-            return
-        elif command == "end-live":
-            res = client.end_live()
-        elif command == "capture-image":
-            success, result = client.capture_image()
-            if success:
-                logger.info("[📸 IMAGE] Image captured successfully.")
-            else:
-                logger.info(f"[❌ ERROR] {result}")
-            return
-        elif command == "exit":
-            client.close()
-            logger.info("[🔌 DISCONNECTED] Client closed.")
-            sys.exit(0)
-        else:
-            logger.info("[❓ UNKNOWN COMMAND]")
-            return
-
-        if res["error"]:
-            logger.info(f"[❌ ERROR] {res['error']}")
-        else:
-            logger.info(f"[✅ SUCCESS] {res['message']}")
-
-    except Exception as e:
-        logger.info(f"[⚠️  EXCEPTION] {str(e)}")
-
-    finally:
-        client.close()
-
-
-
-
-def test_live_stream():
-    # Testing
-    try:
-        client = CameraClient()
-        client.start_live()
-    except Exception as e:
-        print(e)
-    finally:
-        client.close()
-
-
-def test_recording():
-    client = None
-    try:
-        client = CameraClient()
-        res = client.start_recording()
-        time.sleep(10)
-        print(res)
-        res = client.end_recording()    
-        print(res)
-        res = client.get_recording()    
-        print(res)
-    except Exception as e:
-        print(e)
-    finally:
-        if client:
-            client.close()
-
+            cv2.destroyAllWindows()
+        # if self.count>50:
+        #     self.socket_handler.end_live_stream()
 
 
 def parse_args():
@@ -295,6 +248,110 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+def main(command,host,port,debug=False,save_logs=False):
+
+    print(host,port)
+    
+    if debug:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
+
+    logger = logging.getLogger(__name__)
+
+    if save_logs:
+        handler = logging.FileHandler('app_s.log')
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    client = CameraClient(host,port,port+1)
+   
+    try:
+        while True:
+            res = None
+            error = None
+            message = None
+            if command == "start-recording":
+                res = client.start_recording()
+            elif command == "end-recording":
+                res = client.end_recording()
+            elif command == "get-recording":
+                video_paths, error = client.get_recording()
+                if not error:
+                    message = f"[📦 SAVED] Files saved: {video_paths}"
+            elif command == "start-live":
+                logger.info("[🎥 LIVE] Press 'q' to stop streaming.")
+                client.start_live()
+            elif command == "end-live":
+                res = client.end_live()
+            elif command == "capture-image":
+                success, result = client.capture_image()
+                if success:
+                    message="[📸 IMAGE] Image captured successfully."
+                else:
+                    error=f"[❌ ERROR] {result}"
+            elif command == "exit":
+                client.close()
+                logger.info("[🔌 DISCONNECTED] Client closed.")
+                return
+            else:
+                error="[❓ UNKNOWN COMMAND]"
+
+            if res:
+                error = res.error
+                message = res.message
+            if error:
+                logger.info(f"[❌ ERROR] {error}")
+            else:
+                logger.info(f"[✅ SUCCESS] {message}")
+            
+            logger.debug("Waiting for command..")
+            command = input(">")
+
+    except Exception as e:
+        logger.error(f"[⚠️  EXCEPTION] {str(e)}")
+
+    finally:
+        client.close()
+
+       
+
+
+
+
+def test_live_stream():
+    # Testing
+    try:
+        client = CameraClient()
+        client.start_live()
+    except Exception as e:
+        print(e)
+    finally:
+        client.close()
+
+
+def test_recording():
+    client = None
+    try:
+        client = CameraClient()
+        res = client.start_recording()
+        time.sleep(10)
+        print(res)
+        res = client.end_recording()    
+        print(res)
+        res = client.get_recording()    
+        print(res)
+    except Exception as e:
+        print(e)
+    finally:
+        if client:
+            client.close()
+
+
+
 
 if __name__ == "__main__":
     args = parse_args()

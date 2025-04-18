@@ -3,8 +3,11 @@ import threading
 import logging
 import pickle
 import struct
+import time
 from abc import ABC, abstractmethod
 from typing import Callable, Any
+from config.settings import HEADER_SIZE
+
 
 class Streamer(ABC):
     """
@@ -26,23 +29,24 @@ class SocketHandler:
     """
     TYPE_CLIENT = 'client'
     TYPE_SERVER = 'server'
+    print_lock = threading.Lock()
+    header_size = HEADER_SIZE # Used for receiving fixed-length headers
 
-    def __init__(self, host: str, port: int, logger: logging.Logger, type=TYPE_CLIENT):
+    def __init__(self, host: str, port: int, type=TYPE_CLIENT):
         """
         Initializes the socket handler with host, port, logger, and type (client/server).
         """
-        self.logger = logger
+        self.logger = logging.getLogger()
         self.type = type
         self.host = host
         self.port = port
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.reciever = None
         self.reciever_addr = None
-        self.end_live = None
-        self.header_size = struct.calcsize("L")  # Used for receiving fixed-length headers
-        self.init_reciever()
+        self.is_inilialized = False
 
     def init_reciever(self):
+        self.is_inilialized = True
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         """
         Initializes the connection as either a server or client.
         """
@@ -57,43 +61,57 @@ class SocketHandler:
                 self.logger.error("Server not found!")
                 exit(0)
 
-    def send(self, message: Any) -> None:
+    def send(self, message: Any,show=True) -> None:
         """
         Serializes and sends a Python object over the socket connection.
 
         Args:
             message: Any serializable Python object.
         """
-        self.logger.debug(f"Sending message: {message}")
-        body = pickle.dumps(message)
-        header = struct.pack("L", len(body))  # Corrected to use `body` instead of `req`
-        req = header + body
-        self.reciever.sendall(req)
-        self.logger.debug("Request sent.")
+        try:
+            if show:
+                self.logger.debug(f"Sending message: {message}")
+            body = pickle.dumps(message)
+            header = struct.pack("L", len(body))  # Corrected to use `body` instead of `req`
+            req = header + body
+            self.reciever.sendall(req)
+            self.logger.debug("Request sent.")
+        except Exception as e:
+            self.handle_connection_close()
 
     def send_live_stream(self, streamer: Streamer, separe_thread=False) -> None:
         """
-        Continuously sends live data from a streamer until end_live is cleared.
+        Continuously sends live data from a streamer
 
         Args:
             streamer: An object of a class that implements Streamer.
             separe_thread: Whether to run streaming in a separate thread.
         """
+
+        if not self.is_inilialized:
+            self.init_reciever()
+            
         def loop():
-            while self.end_live.is_set():
-                stream = streamer.get_stream()
-                self.send(stream)
-                # Add delay if needed using time.sleep()
+            count = 0
+            while True:
+                count+=1
+                with self.print_lock:
+                    print("Frame  :"+str(count))
+                status,stream = streamer.get_stream()
+                if not status:
+                    self.send('<END>')
+                    break
+                self.send(stream,show=False)
+                time.sleep(0.03)
 
-            self.send('<END>')  # Send termination message
-
-        self.end_live = threading.Event()
-        self.end_live.set()
+              # Send termination message
+            with self.print_lock:
+                print("Live ended.")
 
         if separe_thread:
             th = threading.Thread(target=loop)
             th.start()
-            th.join()
+            # th.join()
         else:
             loop()
 
@@ -104,20 +122,19 @@ class SocketHandler:
         Args:
             stream_callback: A function that receives (bool, data).
             separe_thread: Whether to run receiving in a separate thread.
-        """
+        """ 
+
+        if not self.is_inilialized:
+            self.init_reciever()
+
         def loop():
             self.logger.info('Receiving live stream...')
             data = b''
 
-            while not self.end_live.is_set():
-                # Receive the fixed-size header
-                while len(data) < self.header_size:
-                    data += self.reciever.recv(4096)
-
-                packed_msg_size = data[:self.header_size]
-                msg_size = struct.unpack("L", packed_msg_size)[0]
-                data = data[self.header_size:]
-
+            # Receive the fixed-size header
+            msg = self.reciever.recv(self.header_size)
+            msg_size = struct.unpack("L", msg)[0] 
+            while True:
                 # Receive the message based on the size from the header
                 while len(data) < msg_size:
                     data += self.reciever.recv(4096)
@@ -125,36 +142,35 @@ class SocketHandler:
                 frame_data = data[:msg_size]
                 data = data[msg_size:]
 
-                if frame_data == b"<END>":
+                frames = pickle.loads(frame_data)
+                if frames == "<END>":
                     self.logger.info('Ending live capture...')
                     stream_callback(False, None)
-                    return
+                    break
 
-                frame = pickle.loads(frame_data)
-                stream_callback(True, frame)
+                stream_callback(True, frames)
 
-        self.end_live = threading.Event()
-        self.end_live.clear()
+                if len(data) < self.header_size:
+                    stream_callback(False, None)
+                    break
+                msg = data[:self.header_size]
+                msg_size = struct.unpack("L", msg)[0] 
+                data = data[self.header_size:]
 
         if separe_thread:
             th = threading.Thread(target=loop)
             th.start()
-            th.join()
+            # th.join()
         else:
             loop()
-
-    def end_live_stream(self):
-        """
-        Terminates live streaming by setting the event flag.
-        """
-        if self.end_live:
-            self.end_live.clear()
 
     def handle_connection_close(self):
         if self.type == self.TYPE_CLIENT:
             self.logger.error("Server unavailable!")
+            exit(0)
         else:
             self.logger.error("Client disconnected!")
+            self.accept_connection()
 
     def recieve(self, is_file=False, large_file=False) -> Any:
         """
@@ -173,6 +189,7 @@ class SocketHandler:
             msg_len = 0
 
             # Unpack the binary header to get message length
+
             msg = self.reciever.recv(self.header_size)
             msg_len = struct.unpack("L", msg)[0]   # returns a tuple, get the first item
 
@@ -187,15 +204,13 @@ class SocketHandler:
                 res += msg
 
                 if len(res)== msg_len:
-                    res = res[self.header_size:]
                     break
 
             res = pickle.loads(res)
             self.logger.debug("Received.")
             return res
-        except EOFError as e:
-                self.handle_connection_close()
-                exit(0)
+        except Exception as e:
+            self.handle_connection_close()
 
     def close(self):
         """

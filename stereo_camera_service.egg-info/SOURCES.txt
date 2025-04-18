@@ -5,6 +5,8 @@ camera/camera.py
 camera/parameters.py
 client/__init__.py
 client/camera_client.py
+config/__init__.py
+config/settings.py
 server/__init__.py
 server/camera_server.py
 stereo_camera_service.egg-info/PKG-INFO

@@ -83,7 +83,7 @@ Configure the camera according to Ref: https://www.waveshare.com/wiki/CM4-DUAL-C
 Then run:
 
 ```bash
-python server/camera_server.py
+python server/camera_server.py --host="localhost"
 ```
 
 This will start a socket server at port `8000`.
@@ -95,7 +95,14 @@ This will start a socket server at port `8000`.
 You can request stereo images from the client using:
 
 ```bash
-python client/camera_client.py 
+
+python client/camera_client.py --command="start-live" --host="localhost"
+python client/camera_client.py --command="end-live" --host="localhost"
+python client/camera_client.py --command="get-recording" --host="localhost"
+python client/camera_client.py --command="start-recording" --host="localhost"
+python client/camera_client.py --command="end-recording" --host="localhost"
+python client/camera_client.py --command="exit" --host="localhost"
+python client/camera_client.py --command="capture-image" --host="localhost"
 ```
 
 More options can be added to save images, display output, or retrieve depth data.
