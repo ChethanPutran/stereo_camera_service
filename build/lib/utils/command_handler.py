@@ -1,11 +1,5 @@
 from enum import Enum
 
-class Serializer:
-    def to_dict(self): 
-        pass
-class DeSerializer:
-    def from_dict(self): 
-        pass 
 class Command(Enum):
     """
     Enum representing different types of commands used for controlling a system,
@@ -19,7 +13,8 @@ class Command(Enum):
     END_LIVE = 6
     EXIT = 7
 
-class Response(Serializer,DeSerializer):
+
+class Message:
     """
     A class to represent a message object used for structured communication.
 
@@ -88,7 +83,8 @@ class Response(Serializer,DeSerializer):
         """
         return cls(type=data['type'], data=data.get('data'), error=data.get('error'), message=data.get('message'))
 
-class Request(Serializer,DeSerializer):
+
+class Request:
     """
     A class representing a set of request flags used for communication between components.
 
@@ -103,20 +99,48 @@ class Request(Serializer,DeSerializer):
         end_live (bool): True if live streaming should end.
     """
 
-    def __init__(self, command):
+    def __init__(self, got_size=0,
+                 start_recording=False,
+                 capture_img=False,
+                 end_recording=False,
+                 get_recording=False,
+                 exit_=False,
+                 start_live=False,
+                 end_live=False):
         """
         Initializes a Request object with the given flags.
 
         Args:
-            command (int)
+            got_size (int): Received file size.
+            start_recording (bool): Flag to start recording.
+            capture_img (bool): Flag to capture an image.
+            end_recording (bool): Flag to end recording.
+            get_recording (bool): Flag to request the recorded file.
+            exit_ (bool): Flag to exit the session.
+            start_live (bool): Flag to start live streaming.
+            end_live (bool): Flag to stop live streaming.
         """
-        self.command = command 
+        self.got_size = got_size    
+        self.start_recording = start_recording
+        self.capture_img = capture_img
+        self.end_recording = end_recording
+        self.get_recording = get_recording
+        self.exit = exit_
+        self.start_live = start_live
+        self.end_live = end_live
 
     def __str__(self):
         """
         Returns a string representation of the request state.
         """
-        return f"command :{self.command}"
+        return f"got_size : {self.got_size},\
+        start_recording : {self.start_recording},\
+        capture_img : {self.capture_img},\
+        end_recording : {self.end_recording},\
+        get_recording : {self.get_recording},\
+        exit : {self.exit},\
+        start_live : {self.start_live},\
+        end_live : {self.end_live}"
 
     def to_dict(self):
         """
@@ -126,7 +150,14 @@ class Request(Serializer,DeSerializer):
             dict: Dictionary containing all request fields.
         """
         return {
-            "command": self.command
+            "got_size": self.got_size,
+            "start_recording": self.start_recording,
+            "capture_img": self.capture_img,
+            "end_recording": self.end_recording,
+            "get_recording": self.get_recording,
+            "exit": self.exit,
+            "start_live": self.start_live,
+            "end_live": self.end_live
         }
 
     @classmethod
@@ -141,94 +172,12 @@ class Request(Serializer,DeSerializer):
             Request: An instance of the Request class.
         """
         return cls(
-            command=data.get("command", 0)
+            got_size=data.get("got_size", 0),
+            start_recording=data.get("start_recording", False),
+            capture_img=data.get("capture_img", False),
+            end_recording=data.get("end_recording", False),
+            get_recording=data.get("get_recording", False),
+            exit_=data.get("exit", False),
+            start_live=data.get("start_live", False),
+            end_live=data.get("end_live", False)
         )
-
-class Header(Serializer,DeSerializer):
-    def __init__(self,start=True,end=False,configs=None):
-        self.start=start
-        self.end=end
-        self.configs=configs
-    def to_dict(self):
-        return {
-            "start": self.start,
-            "end": self.end,
-            "configs": self.configs.to_dict() if self.configs else None
-        }
-    def from_dict(cls, data):
-        return cls(start=data['start'], end=data.get('end'))
-
-class Frame(Serializer,DeSerializer):
-    def __init__(self,left,right):
-        self.right = right
-        self.left = left
-    def to_dict(self):
-        return {
-            "left": self.left,
-            "right": self.right,
-        }
-    def from_dict(cls, data):
-        return cls(left=data['left'], right=data.get('right'))
-
-class FrameData(Serializer,DeSerializer):
-    def __init__(self,left=None,right=None,header=None):
-        self.header = header or Header(False,False)
-        self.data = Frame(left,right)
-        
-    def __str__(self):
-        return f"header : {self.header.to_dict()}, data : {self.data.to_dict()}"
-
-    def to_dict(self):
-        return {
-            "header": self.header.to_dict(),
-            "data": self.data.to_dict()
-        }
-
-    @classmethod
-    def from_dict(cls, data):
-        return cls(header=data['header'], data=data.get('data'))
-  
-class CameraConfig(Serializer,DeSerializer):
-    FPS = 30
-    WIDTH = 720
-    HEIGHT = 720
-
-    def __init__(self,frame_count,fps=FPS,width=WIDTH,height=HEIGHT):
-        self.fps=fps
-        self.width=width
-        self.height=height
-        self.frame_count=frame_count
-
-    def __str__(self):
-        """
-        Returns a string representation of the camera configurations.
-        """
-        return f"FPS : {self.fps}, WIDTH : {self.WIDTH}, HEIGHT : {self.HEIGHT}, frame_count :{self.frame_count}"
-
-    def to_dict(self):
-        """
-        Converts the CameraConfig object into a dictionary.
-
-        Returns:
-            dict: A dictionary representation of the CameraConfig.
-        """
-        return {
-            "fps": self.FPS,
-            "width": self.WIDTH,
-            "height": self.HEIGHT,
-            "frame_count": self.frame_count,
-        }
-
-    @classmethod
-    def from_dict(cls, data):
-        """
-        Creates a CameraConfig object from a dictionary.
-
-        Args:
-            data (dict): Dictionary with keys matching CameraConfig attributes.
-
-        Returns:
-            CameraConfig: An instance of CameraConfig.
-        """
-        return cls(frame_count=data.get('frame_count'),fps=data['fps'], width=data.get('width'), height=data.get('height'))
-

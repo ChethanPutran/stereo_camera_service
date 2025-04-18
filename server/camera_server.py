@@ -1,8 +1,40 @@
-import threading
 import logging
 from utils.socket_handler import SocketHandler
 from camera.camera import Camera
-from utils.command_handler import Command, Message
+from utils.command_handler import Command, Response,Request,FrameData,CameraConfig,Header
+import argparse
+import cv2
+from config.settings import HOST,PORT_C,PORT_S
+
+def stero_video_reader(callback,left_file_name,right_file_name):
+    cap_left = cv2.VideoCapture(left_file_name)
+    cap_right = cv2.VideoCapture(right_file_name)
+
+    width = int(cap_left.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap_left.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap_left.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap_left.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Send video configurations
+    callback(CameraConfig(frame_count,fps,width,height))
+
+    while (cap_left.isOpened() and cap_right.isOpened()):
+        print("Reading frame...")
+        ret1, frame_left = cap_left.read()
+        ret2, frame_right = cap_right.read()
+
+        if (not ret1) or (not ret2):
+            callback(FrameData(header=Header(end=True)))
+            break
+
+        # Encode frame
+        _, buffer1 = cv2.imencode('.jpg', frame_left)
+        _, buffer2 = cv2.imencode('.jpg', frame_right)
+        callback(FrameData(left=buffer1,right=buffer2))
+        cv2.waitKey(33)  # simulate ~30fps
+    print("Completely sent.")
+    cap_left.release()
+    cap_right.release()
 
 class CameraServer:
     """
@@ -11,93 +43,110 @@ class CameraServer:
     live streaming, capturing images, etc.
     """
 
-    def __init__(self, socket_handler: SocketHandler, camera: Camera, logger: logging.Logger):
+    def __init__(self,host=HOST,port_c=PORT_C,port_s=PORT_S):
         """
         Initialize the server with a socket handler and camera.
         """
-        self.socket_handler = socket_handler
-        self.camera = camera
+        self.command_socket_handler = SocketHandler(host,port_c,type=SocketHandler.TYPE_SERVER)
+        self.command_socket_handler.init_reciever()
+        self.stream_socket_handler = SocketHandler(host,port_s,type=SocketHandler.TYPE_SERVER)
+        self.camera = Camera()
         self.recording_status = False
-        self.logger = logger
+        self.logger = logging.getLogger()
 
-    def handle_request(self, request):
+    def start(self):
+        pass
+
+    def get_request(self)->Request:
+        res = self.command_socket_handler.recieve()
+        return res
+
+    def handle_command(self, command):
         """
         Handle incoming requests from the client.
         Routes the request to appropriate camera operation.
         """
         try:
-            if request == Command.START_RECORDING:
-                if self.recording_status:
-                    self.socket_handler.send(Message(Message.TYPE_ERROR, error="Already recording!"))
+            self.logger.info("Got command :"+str(command))
+            if command == Command.START_RECORDING:
+                if self.camera.is_recording():
+                    self.command_socket_handler.send(Response(Response.TYPE_ERROR, error="Already recording!"))
                     return
-                self.recording_status = True
-                threading.Thread(target=self.camera.start_recording).start()
-                self.socket_handler.send(Message(Message.TYPE_MESSAGE, message="Recording started."))
+                self.logger.info("Starting recording...")
+                self.camera.start_recording()
+                self.logger.info("Recording started.")
+                self.command_socket_handler.send(Response(Response.TYPE_MESSAGE, message="Recording started."))
 
-            elif request == Command.END_RECORDING:
-                if not self.recording_status:
-                    self.socket_handler.send(Message(Message.TYPE_ERROR, error="Camera is not recording!"))
+            elif command == Command.END_RECORDING:
+                if not self.camera.is_recording():
+                    self.command_socket_handler.send(Response(Response.TYPE_ERROR, error="Camera is not recording!"))
                     return
 
                 self.camera.end_recording()
-                self.socket_handler.end_live_stream()
-
-                if not self.camera.get_recording_state():
-                    self.socket_handler.send(Message(Message.TYPE_MESSAGE, message="Recording ended."))
+                if not self.camera.is_recording():
+                    self.command_socket_handler.send(Response(Response.TYPE_MESSAGE, message="Recording ended."))
                     self.recording_status = False
                 else:
-                    self.socket_handler.send(Message(Message.TYPE_ERROR, error="Couldn't stop recording."))
+                    self.command_socket_handler.send(Response(Response.TYPE_ERROR, error="Couldn't stop recording."))
 
-            elif request == Command.CAPTURE_IMAGE:
+            elif command == Command.CAPTURE_IMAGE:
                 img_left, img_right = self.camera.capture_image()
-                self.socket_handler.send(Message(Message.TYPE_DATA, data={"left_img": img_left, "right_img": img_right}))
+                self.command_socket_handler.send(Response(Response.TYPE_DATA, data={"left_img": img_left, "right_img": img_right}))
 
-            elif request == Command.GET_RECORDING:
-                if self.recording_status:
-                    self.socket_handler.send(Message(
-                        Message.TYPE_ERROR,
+            elif command == Command.GET_RECORDING:
+                if self.camera.is_recording():
+                    self.command_socket_handler.send(Response(
+                        Response.TYPE_ERROR,
                         error="Can't send recording while camera is recording! Stop the recording first!"
                     ))
                     return
+                self.logger.debug("Fetching recording...")
 
-                recordings, error = self.camera.get_recording()
-                if error:
-                    self.socket_handler.send(Message(Message.TYPE_ERROR, error=error))
-                else:
-                    self.socket_handler.send(Message(Message.TYPE_DATA, data={"recordings": recordings}))
+                rec_file_name = self.camera.get_recorded_file()
+                if not rec_file_name[0]:
+                    self.command_socket_handler.send(Response(Response.TYPE_ERROR, error="No recording exists!")) 
+                    return
 
-            elif request == Command.EXIT:
-                if self.recording_status:
-                    self.socket_handler.send(Message(Message.TYPE_ERROR, error="Stop recording before exiting."))
+                self.command_socket_handler.send(Response(Response.TYPE_MESSAGE, message="Sending recording...")) 
+                stero_video_reader(self.command_socket_handler.send,*rec_file_name)
+                self.camera.clear_recordings()
+
+            elif command == Command.EXIT:
+                if self.camera.is_recording():
+                    self.command_socket_handler.send(Response(Response.TYPE_ERROR, error="Stop recording before exiting."))
                     return
 
                 self.camera.close()
-                self.socket_handler.send(Message(Message.TYPE_MESSAGE, message="Camera closed!"))
+                return
+                # self.command_socket_handler.send(Response(Response.TYPE_MESSAGE, message="Camera closed!"))
 
-            elif request == Command.START_LIVE:
-                if self.recording_status:
-                    self.socket_handler.send(Message(
-                        Message.TYPE_ERROR,
+            elif command == Command.START_LIVE:
+                if self.camera.is_recording():
+                    self.command_socket_handler.send(Response(
+                        Response.TYPE_ERROR,
                         error="Can't start live streaming while recording!"
                     ))
                 elif not self.camera.is_live_streaming():
-                    self.socket_handler.send_live_stream(self.camera, separe_thread=True)
+                    self.camera.start_live_streaming()
+                    self.command_socket_handler.send(Response(Response.TYPE_MESSAGE, message="Live streaming started."))
+                    self.stream_socket_handler.send_live_stream(self.camera, separe_thread=True)
                 else:
-                    self.socket_handler.send(Message(Message.TYPE_ERROR, error="Already live streaming."))
+                    self.command_socket_handler.send(Response(Response.TYPE_ERROR, error="Already live streaming."))
 
-            elif request == Command.END_LIVE:
+            elif command == Command.END_LIVE:
                 if not self.camera.is_live_streaming():
-                    self.socket_handler.send(Message(Message.TYPE_ERROR, error="Not in live streaming!"))
+                    self.command_socket_handler.send(Response(Response.TYPE_ERROR, error="Not in live streaming!"))
                 else:
                     self.camera.stop_live_streaming()
-                    self.socket_handler.send(Message(Message.TYPE_MESSAGE, message="Live streaming ended."))
+                    self.command_socket_handler.send(Response(Response.TYPE_MESSAGE, message="Live streaming ended."))
 
             else:
-                self.socket_handler.send(Message(Message.TYPE_ERROR, error="Invalid command!"))
+                self.command_socket_handler.send(Response(Response.TYPE_ERROR, error="Invalid command!"))
 
         except Exception as e:
+            self.camera.close()
             self.logger.exception("Exception while handling request")
-            self.socket_handler.send(Message(Message.TYPE_ERROR, error=f"Internal server error: {str(e)}"))
+            self.command_socket_handler.send(Response(Response.TYPE_ERROR, error=f"Internal server error: {str(e)}"))
 
     def start(self):
         """
@@ -105,46 +154,75 @@ class CameraServer:
         """
         try:
             while True:
-                request = self.socket_handler.recieve()
-                if not request:
-                    break
-                self.handle_request(request)
+                request = self.get_request()
+                self.logger.debug("New Req: "+str(request))
+                if request:
+                    self.handle_command(request.command)
         except Exception as e:
-            self.logger.exception("Error in server loop")
-            self.socket_handler.send(Message(Message.TYPE_ERROR, error=f"An error occurred: {str(e)}"))
+            # self.logger.exception("Error in server loop")
+            self.command_socket_handler.send(Response(Response.TYPE_ERROR, error=f"An error occurred: {str(e)}"))
         finally:
             self.camera.close()
-            self.socket_handler.close()
+            self.command_socket_handler.close()
 
-def main():
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Stereo Camera Server CLI Tool"
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        help="Host name (default: 'raspberrypi.local')",
+        default="raspberrypi.local"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        help="Port (default: 8000)",
+        default=8000
+    )
+    parser.add_argument(
+        "--debug",
+        type=int,
+        help="Enable debug mode (default: 0 for off)",
+        choices=[0, 1],
+        default=0
+    )
+    parser.add_argument(
+        "--save_logs",
+        type=int,
+        help="Save logs to file (default: 0 for off)",
+        choices=[0, 1],
+        default=0
+    )
+
+    return parser.parse_args()
+
+def main(host='raspberrypi.local',port=8000,debug=False,save_logs=False):
     """
     Entry point for the Camera Server.
     Initializes logging, camera, socket handler, and starts server.
     """
-    STERIO = True
-    DEBUG = True
-    HEADER_SIZE = 10
-    HOST = 'raspberrypi.local'
-    PORT = 8000
-    SAVE_LOGS = False
 
-    if DEBUG:
+
+    if debug:
         logging.basicConfig(level=logging.DEBUG)
     else:
         logging.basicConfig(level=logging.INFO)
 
     logger = logging.getLogger(__name__)
 
-    if SAVE_LOGS:
+    if save_logs:
         handler = logging.FileHandler('app_s.log')
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
-    sh = SocketHandler(HOST, PORT, logger, SocketHandler.TYPE_SERVER)
-    camera = Camera(logger)
-    cs = CameraServer(sh, camera, logger)
+    cs = CameraServer(host, port_c=port, port_s=port+1)
     cs.start()
 
+
+
 if __name__ == '__main__':
-    main()
+    args = parse_args()
+    main(args.host, args.port, args.debug, args.save_logs)

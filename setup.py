@@ -10,7 +10,7 @@ setup(
     author="Chethan",  # Update as needed
     author_email="chethansputran222@gmail.com",
     description="A Python package for interfacing Raspberry Pi with Waveshare Binocular Camera and enabling remote stereo vision services.",
-    long_description=open("README.md").read(),
+    long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/ChethanPutran/stereo_camera_service",  
     packages=find_packages(),

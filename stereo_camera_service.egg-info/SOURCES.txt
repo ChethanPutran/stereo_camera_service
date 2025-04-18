@@ -11,7 +11,11 @@ stereo_camera_service.egg-info/PKG-INFO
 stereo_camera_service.egg-info/SOURCES.txt
 stereo_camera_service.egg-info/dependency_links.txt
 stereo_camera_service.egg-info/entry_points.txt
-stereo_camera_service.egg-info/requires.txt
 stereo_camera_service.egg-info/top_level.txt
 tests/__init__.py
-tests/test_server.py
+tests/test_camera_client.py
+tests/test_camera_server.py
+utils/__init__.py
+utils/command_handler.py
+utils/socket_handler.py
+utils/start_server.py

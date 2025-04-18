@@ -1,14 +1,41 @@
 import cv2
 import time
 import numpy as np
+import logging
 from utils.socket_handler import Streamer
-from abc import override
+import threading
+import os
+
+TESTING = True
 
 try:
     from picamera2 import Picamera2
 except Exception as e:
     class Picamera2:
-        pass
+        cap = cv2.VideoCapture(0)
+        def __init__(self,id):
+            if not Picamera2.cap:
+                self.cap = cv2.VideoCapture(0)
+            self.id = id
+            self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.frame_size = (self.frame_width,self.frame_height)
+            # Get frames per second (FPS)
+            self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+        def create_video_configuration(self,main,controls):
+            return None
+        def configure(self,config):
+            pass
+        def capture_array(self):
+            return self.cap.read()[1]
+        def read(self):
+            return self.cap.read()[1]
+        def start(self):
+            pass
+        def stop(self):
+            pass
+        def close(self):
+            return self.cap.release()
 
 
 class CameraInterface:
@@ -64,7 +91,7 @@ class Camera(Streamer):
     FPS = 30.0
     STERIO = True
 
-    def __init__(self, logger=None):
+    def __init__(self):
         """
         Initializes the Camera object, setting up the camera configurations and logger.
         """
@@ -77,10 +104,20 @@ class Camera(Streamer):
             "active": False,
             "live": False
         }
-        self.logger = logger
-        self.exit = False
+        self.live_event = threading.Event()
+        self.recording_event = threading.Event()
+        self.logger = logging.getLogger()
         self.set_config()
-
+        self.init_cam()
+        
+        if TESTING:
+            self.fps = self.cam_left.fps
+            self.img_width = self.cam_left.frame_width
+            self.img_height = self.cam_left.frame_height
+            self.size =self.cam_left.frame_size
+            
+    def init_cam(self):
+        self.is_closed = False
         try:
             self.cam_left = Picamera2(self.camera_left_id)
             video_config = self.cam_left.create_video_configuration(main=self.main, controls=self.controls)
@@ -107,7 +144,7 @@ class Camera(Streamer):
         self.fps = fps
         self.img_width = img_width
         self.img_height = img_height
-        self.size = (self.img_height, self.img_width)
+        self.size = (self.img_width,self.img_height)
         self.format = color_format
         self.fdl = (33333, 33333)
 
@@ -119,7 +156,13 @@ class Camera(Streamer):
         self.controls = {"FrameDurationLimits": self.fdl}
         self.main = {"size": self.size, "format": "RGB888"}
 
-    @override
+    def start_live_streaming(self):
+        self.check_cam()
+        self.live_event.set()
+
+    def stop_live_streaming(self):
+        self.live_event.clear()
+
     def get_stream(self):
         """
         Retrieves a pair of stereo images (left and right) from the cameras if the system is live.
@@ -127,32 +170,38 @@ class Camera(Streamer):
         Returns:
             tuple: (left_image, right_image) if live, otherwise None.
         """
-        if self.state['live']:
+        if self.live_event.is_set():
             try:
                 img_left = self.cam_left.read()
                 img_right = self.cam_right.read()
-                return (img_left, img_right)
+                return True,(img_left, img_right)
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"Error getting stream: {e}")
-                return None
-        return None
+        return False,(None,None)
 
-    def start_recording(self):
+    def is_live_streaming(self):
+        return self.live_event.is_set()
+    
+    def start_recording(self,use_separate_thread=True):
         """
         Starts the recording process, saving both left and right camera streams to video files.
         """
-        self.state['record'] = True
-        self.exit = False
-        self.record()
+        self.check_cam()
+        self.recording_event.set()
 
+        if use_separate_thread:
+            th = threading.Thread(target=self.record)
+            th.start()
+            # th.join()
+        else:
+            self.record()
+    
     def end_recording(self):
         """
         Ends the recording process and waits for it to stop.
         """
-        self.exit = True
-        while self.state['record']:
-            time.sleep(0.1)
+        self.recording_event.clear()
 
     def set_state(self, recording_left=None, recording_right=None, active=None):
         """
@@ -179,14 +228,14 @@ class Camera(Streamer):
         """
         return self.state
 
-    def get_recording_state(self):
+    def is_recording(self):
         """
         Returns whether the camera system is currently recording.
         
         Returns:
             bool: True if recording, False otherwise.
         """
-        return self.state['record']
+        return self.recording_event.is_set()
 
     def record(self):
         """
@@ -196,25 +245,22 @@ class Camera(Streamer):
             file_name = str(int(time.time()))
             fname_l = f"left_{file_name}.avi"
             fourcc = cv2.VideoWriter_fourcc(*'XVID')
-            out_l = cv2.VideoWriter(fname_l, fourcc, self.FPS, self.size)
+            out_l = cv2.VideoWriter(fname_l, fourcc, self.fps, self.size)
 
             fname_r = f"right_{file_name}.avi"
-            out_r = cv2.VideoWriter(fname_r, fourcc, self.FPS, self.size)
+            out_r = cv2.VideoWriter(fname_r, fourcc, self.fps, self.size)
 
             self.cam_left.start()
             self.cam_right.start()
 
-            while True:
-                if self.exit:
-                    if self.logger:
-                        self.logger.info('Ending recording...')
-                    break
-
+            while self.recording_event.is_set():
                 frame_l = self.cam_left.capture_array()
                 frame_r = self.cam_right.capture_array()
 
                 out_r.write(frame_r)
                 out_l.write(frame_l)
+
+            self.logger.info('Ending recording...')
 
             self.cam_left.stop()
             self.cam_right.stop()
@@ -222,14 +268,13 @@ class Camera(Streamer):
             out_l.release()
             out_r.release()
 
-            self.cam_left.close()
-            self.cam_right.close()
+            # self.cam_left.close()
+            # self.cam_right.close()
 
             self.set_state(
                 {'state': True, 'fname': fname_l},
                 {'state': True, 'fname': fname_r}
             )
-            self.state['record'] = False
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Error during recording: {e}")
@@ -249,37 +294,12 @@ class Camera(Streamer):
         else:
             return self.state['recording']['left']['fname'], self.state['recording']['right']['fname']
 
-    def get_recording(self, sterio=True):
-        """
-        Retrieves the recorded video data from both cameras.
-
-        Args:
-            sterio (bool): Whether stereo video is enabled.
-
-        Returns:
-            tuple: Recorded video data for left and right cameras.
-        """
-        rec_file_name = self.get_recorded_file()
-        if not rec_file_name:
-            return None, "No recording exists!"
+    def clear_recordings(self):
+        os.remove(self.state['recording']['left']['fname'])
+        os.remove(self.state['recording']['right']['fname'])
         
-        try:
-            if not sterio:
-                with open(rec_file_name, 'rb') as video:
-                    rec_l = video.read()
-                return ((rec_file_name, rec_l),), None
-
-            with open(rec_file_name[0], 'rb') as video:
-                rec_l = video.read()
-
-            with open(rec_file_name[1], 'rb') as video:
-                rec_r = video.read()
-
-            return ((rec_file_name[0], rec_l), (rec_file_name[1], rec_r)), None
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Error retrieving recording: {e}")
-            return None, f"Error retrieving recording: {e}"
+        self.state['recording']['left']['fname'] = None
+        self.state['recording']['right']['fname'] = None
 
     def capture_image(self):
         """
@@ -288,6 +308,7 @@ class Camera(Streamer):
         Returns:
             tuple: A pair of images from the left and right cameras.
         """
+        self.check_cam()
         try:
             self.cam_left.start()
             self.cam_right.start()
@@ -328,6 +349,18 @@ class Camera(Streamer):
         try:
             self.cam_left.close()
             self.cam_right.close()
+            self.is_closed  = True
+
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Error closing cameras: {e}")
+
+    def is_cam_closed(self):
+        return self.is_closed 
+
+    def open_camera(self):
+        self.init_cam()
+
+    def check_cam(self):
+        if self.is_cam_closed():
+            self.open_camera()
